@@ -22,7 +22,9 @@ async fn main() -> Result<(), BoxError> {
         provider.plan_limit, provider.group_max
     );
 
-    let addr = "0.0.0.0:8086".parse()?;
+    // Localhost only: the provider runs as a sidecar next to the
+    // cluster-autoscaler, and nothing outside the pod may call it.
+    let addr = "127.0.0.1:8086".parse()?;
     println!("externalgrpc provider listening on {addr}");
 
     Server::builder()
