@@ -46,3 +46,46 @@ jobs:
 
       - name: Build
         run: cargo build --locked
+
+  helm:
+    runs-on: ubuntu-latest
+    env:
+      CHART: charts/upcloud-cluster-autoscaler
+      CLUSTER_ID: 00000000-0000-4000-8000-000000000000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v3.19.0
+
+      - name: Lint
+        run: helm lint "$CHART" --set clusterId="$CLUSTER_ID" --set upcloud.existingSecret=uca-token
+
+      - name: Render with valid values
+        run: |
+          helm template test "$CHART" --set clusterId="$CLUSTER_ID" --set upcloud.existingSecret=uca-token > /dev/null
+          helm template test "$CHART" --set clusterId="$CLUSTER_ID" --set upcloud.token=example > /dev/null
+
+      # Each of these must fail with the expected message, so a later change
+      # can't quietly remove a safety check.
+      - name: Reject invalid values
+        run: |
+          expect_fail() {
+            local expected="$1"; shift
+            if output=$(helm template test "$CHART" "$@" 2>&1); then
+              echo "::error::expected failure ($expected) but rendering succeeded: $*"
+              exit 1
+            fi
+            if ! grep -q "$expected" <<<"$output"; then
+              echo "::error::expected '$expected' in the error, got:"
+              echo "$output"
+              exit 1
+            fi
+            echo "ok: $expected"
+          }
+
+          expect_fail "does not match pattern" --set upcloud.existingSecret=uca-token
+          expect_fail "does not match pattern" --set clusterId=not-a-uuid --set upcloud.existingSecret=uca-token
+          expect_fail "An UpCloud API token is required" --set clusterId="$CLUSTER_ID"
+          expect_fail "Set only one of" --set clusterId="$CLUSTER_ID" --set upcloud.token=a --set upcloud.existingSecret=b

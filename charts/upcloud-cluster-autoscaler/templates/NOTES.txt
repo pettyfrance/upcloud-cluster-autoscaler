@@ -1,0 +1,13 @@
+The UpCloud cluster-autoscaler is installed in namespace {{ .Release.Namespace }}.
+
+Check it's running:
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+
+Logs:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "uca.fullname" . }} -c provider
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "uca.fullname" . }} -c cluster-autoscaler
+
+Autoscaler status:
+  kubectl -n {{ .Release.Namespace }} get configmap cluster-autoscaler-status -o yaml
+
+Every node group in the cluster is autoscaled between 1 and 16 nodes.

@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "uca.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "uca.labels" . | nindent 4 }}
+spec:
+  # The cluster-autoscaler must only run once.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "uca.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Stops the autoscaler from removing the node it's running on.
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+        # Restarts the pod when the cloud-config changes.
+        checksum/cloud-config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "uca.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "uca.fullname" . }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cluster-autoscaler
+          image: "{{ .Values.autoscaler.image.repository }}:{{ .Values.autoscaler.image.tag }}"
+          imagePullPolicy: {{ .Values.autoscaler.image.pullPolicy }}
+          command:
+            - ./cluster-autoscaler
+          args:
+            - --cloud-provider=externalgrpc
+            - --cloud-config=/config/cloud-config
+            # Status ConfigMap goes in the release namespace, where the Role grants access.
+            - --namespace={{ .Release.Namespace }}
+            {{- range $flag, $value := .Values.autoscaler.extraArgs }}
+            - --{{ $flag }}={{ $value }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8085
+          livenessProbe:
+            httpGet:
+              path: /health-check
+              port: http
+          volumeMounts:
+            - name: cloud-config
+              mountPath: /config
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          {{- with .Values.autoscaler.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        - name: provider
+          image: "{{ .Values.provider.image.repository }}:{{ .Values.provider.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.provider.image.pullPolicy }}
+          env:
+            - name: UPCLOUD_CLUSTER_ID
+              value: {{ .Values.clusterId | quote }}
+            - name: UPCLOUD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "uca.secretName" . }}
+                  key: {{ include "uca.secretKey" . }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          {{- with .Values.provider.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: cloud-config
+          configMap:
+            name: {{ include "uca.fullname" . }}-cloud-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["clusterId"],
+  "properties": {
+    "clusterId": {
+      "type": "string",
+      "description": "UUID of the UKS cluster to autoscale.",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "upcloud": {
+      "type": "object",
+      "properties": {
+        "token": { "type": "string" },
+        "existingSecret": { "type": "string" },
+        "existingSecretKey": { "type": "string", "minLength": 1 }
+      }
+    },
+    "autoscaler": {
+      "type": "object",
+      "properties": {
+        "extraArgs": { "type": "object" }
+      }
+    }
+  }
+}

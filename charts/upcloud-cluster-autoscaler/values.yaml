@@ -1,0 +1,57 @@
+# UUID of the UKS cluster to autoscale. Required.
+clusterId: ""
+
+upcloud:
+  # UpCloud API token. Setting this makes the chart create a Secret for it.
+  # Set either this or existingSecret, not both.
+  token: ""
+  # Name of an existing Secret holding the token. Keeps the token out of
+  # Helm values.
+  existingSecret: ""
+  # Key in existingSecret that holds the token.
+  existingSecretKey: token
+
+# The UpCloud provider, run as a sidecar next to the cluster-autoscaler.
+provider:
+  image:
+    repository: ghcr.io/pettyfrance/upcloud-cluster-autoscaler
+    # Defaults to the chart's appVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
+autoscaler:
+  image:
+    repository: registry.k8s.io/autoscaling/cluster-autoscaler
+    # Should match your cluster's Kubernetes minor version.
+    tag: v1.36.2
+    pullPolicy: IfNotPresent
+  # Extra cluster-autoscaler flags, as flag: value. For example:
+  #   scale-down-unneeded-time: 5m
+  #   v: 4
+  extraArgs: {}
+  resources:
+    requests:
+      cpu: 100m
+      memory: 300Mi
+    limits:
+      memory: 600Mi
+
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Keeps the autoscaler from being evicted when the cluster is short of
+# resources, which is when it's needed most.
+priorityClassName: system-cluster-critical

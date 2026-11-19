@@ -1,0 +1,14 @@
+apiVersion: v2
+name: upcloud-cluster-autoscaler
+description: Kubernetes cluster-autoscaler for UpCloud Managed Kubernetes (UKS), using an externalgrpc cloud provider.
+type: application
+# version and appVersion are set from the Git tag when a release is published.
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/pettyfrance/upcloud-cluster-autoscaler
+sources:
+  - https://github.com/pettyfrance/upcloud-cluster-autoscaler
+keywords:
+  - autoscaler
+  - upcloud
+  - uks
