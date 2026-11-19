@@ -1,0 +1,89 @@
+name: Release
+
+# Publishes the provider image and the Helm chart to GHCR when a version tag
+# such as v0.1.0 is pushed. The tag is the release version for both.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  # Lets GITHUB_TOKEN push the image and chart to GHCR.
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Work out the version and names
+        id: meta
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # GHCR names must be lowercase.
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/$owner/upcloud-cluster-autoscaler" >> "$GITHUB_OUTPUT"
+          echo "charts=oci://ghcr.io/$owner/charts" >> "$GITHUB_OUTPUT"
+
+      # Stops a release whose tag doesn't match Cargo.toml, so the binary,
+      # image and chart versions can't drift apart.
+      - name: Check the tag matches Cargo.toml
+        run: |
+          cargo_version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$cargo_version" != "${{ steps.meta.outputs.version }}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} doesn't match Cargo.toml version $cargo_version"
+            exit 1
+          fi
+
+      # --- Image ---
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Tags 0.1.0, 0.1 and latest for a release; only the full version for a
+      # pre-release such as 0.1.0-rc.1.
+      - id: tags
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.meta.outputs.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: ${{ steps.tags.outputs.labels }}
+          # Reuses compiled dependencies from earlier releases.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --- Chart ---
+
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v3.19.0
+
+      # The chart's default provider image tag is its appVersion, so setting
+      # both from the tag makes the chart install the image built above.
+      - name: Package and push the chart
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          CHARTS: ${{ steps.meta.outputs.charts }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          helm package charts/upcloud-cluster-autoscaler \
+            --version "$VERSION" --app-version "$VERSION" --destination dist
+          echo "$GITHUB_TOKEN" | helm registry login ghcr.io \
+            --username "${{ github.actor }}" --password-stdin
+          helm push "dist/upcloud-cluster-autoscaler-$VERSION.tgz" "$CHARTS"
