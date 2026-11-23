@@ -10,4 +10,5 @@ Logs:
 Autoscaler status:
   kubectl -n {{ .Release.Namespace }} get configmap cluster-autoscaler-status -o yaml
 
-Every node group in the cluster is autoscaled between 1 and 16 nodes.
+Node group limits are set in the nodeGroups value. The provider logs each
+group's limits when it starts; see the provider logs above.
