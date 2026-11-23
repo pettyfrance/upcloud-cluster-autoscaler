@@ -11,6 +11,26 @@ upcloud:
   # Key in existingSecret that holds the token.
   existingSecretKey: token
 
+# Autoscaling limits for the cluster's UKS node groups. A group takes each
+# setting from its entry in overrides, then from default.
+#   min:     fewest nodes. At least 1, as UKS doesn't allow empty groups.
+#            Default 1.
+#   max:     most nodes. Defaults to the cluster's per-group cap: the plan's
+#            node limit, at most 16. Can't be set higher.
+#   enabled: false makes the autoscaler leave the group alone. Default true.
+# The provider checks these at startup and won't start if they're invalid.
+nodeGroups:
+  # Applies to every group without an override, including groups added later.
+  default:
+    min: 1
+  # Settings for specific groups, keyed by UKS node group name. For example:
+  #   workers:
+  #     min: 2
+  #     max: 5
+  #   batch:
+  #     enabled: false
+  overrides: {}
+
 # The UpCloud provider, run as a sidecar next to the cluster-autoscaler.
 provider:
   image:

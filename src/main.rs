@@ -1,9 +1,13 @@
+mod config;
 mod provider;
 mod upcloud;
 mod proto {
     include!(concat!(env!("OUT_DIR"), "/mod.rs"));
 }
 
+use std::path::Path;
+
+use config::NodeGroupsConfig;
 use proto::clusterautoscaler::cloudprovider::v1::externalgrpc::cloud_provider_server::CloudProviderServer;
 use provider::UpcloudProvider;
 use tokio::signal::unix::{SignalKind, signal};
@@ -27,11 +31,15 @@ async fn main() -> Result<(), BoxError> {
         std::env::var("UPCLOUD_CLUSTER_ID").map_err(|_| "UPCLOUD_CLUSTER_ID is not set")?;
     let token = std::env::var("UPCLOUD_TOKEN").map_err(|_| "UPCLOUD_TOKEN is not set")?;
 
-    let provider = UpcloudProvider::new(cluster_id, token).await?;
-    println!(
-        "plan limit {}, node group max {}",
-        provider.plan_limit, provider.group_max
-    );
+    // Read before any API calls, so a bad file fails straight away. Without
+    // a file, every group is managed with the built-in limits.
+    let node_groups_config = match std::env::var_os("UPCLOUD_NODE_GROUPS_CONFIG") {
+        Some(path) => NodeGroupsConfig::from_file(Path::new(&path))?,
+        None => NodeGroupsConfig::default(),
+    };
+
+    let provider = UpcloudProvider::new(cluster_id, token, node_groups_config).await?;
+    provider.log_limits()?;
 
     // Localhost only: the provider runs as a sidecar next to the
     // cluster-autoscaler, and nothing outside the pod may call it.

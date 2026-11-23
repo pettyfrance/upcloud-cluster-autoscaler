@@ -3,6 +3,7 @@ use std::sync::RwLock;
 use tonic::{Request, Response, Status};
 
 use crate::BoxError;
+use crate::config::{Limits, NodeGroupLimits, NodeGroupsConfig};
 use crate::proto::clusterautoscaler::cloudprovider::v1::externalgrpc::{
     CleanupRequest, CleanupResponse, Instance, InstanceErrorInfo, InstanceStatus, NodeGroup,
     NodeGroupDecreaseTargetSizeRequest, NodeGroupDecreaseTargetSizeResponse,
@@ -14,46 +15,99 @@ use crate::proto::clusterautoscaler::cloudprovider::v1::externalgrpc::{
 };
 use crate::upcloud::{UksNode, UksNodeGroup, UpcloudApi};
 
-/// Minimum size of every node group. UKS doesn't allow empty node groups.
-const MIN_NODES_PER_GROUP: i32 = 1;
-
 /// Maximum `count` UKS accepts for a single node group.
 /// Taken from UpCloud API Docs
 const MAX_NODES_PER_GROUP: i32 = 16;
 
 pub(crate) struct UpcloudProvider {
     api: UpcloudApi,
-    pub(crate) plan_limit: i32,
-    /// Max size of every node group: the plan limit, capped at the UKS per-group max.
-    pub(crate) group_max: i32,
+    plan_limit: i32,
+    /// Most nodes one group can have: the plan limit, capped at the UKS
+    /// per-group max. No configured max can be above it.
+    group_cap: i32,
+    limits: NodeGroupLimits,
     node_groups: RwLock<Vec<UksNodeGroup>>,
 }
 
 impl UpcloudProvider {
-    pub(crate) async fn new(cluster_id: String, token: String) -> Result<Self, BoxError> {
+    pub(crate) async fn new(
+        cluster_id: String,
+        token: String,
+        config: NodeGroupsConfig,
+    ) -> Result<Self, BoxError> {
         let api = UpcloudApi::new(cluster_id, token);
 
         let cluster = api.fetch_cluster().await?;
         let plan_limit = plan_limit(&cluster.plan)?;
+        let group_cap = plan_limit.min(MAX_NODES_PER_GROUP);
+        let limits = config.resolve(group_cap)?;
         let groups = api.fetch_node_groups_with_nodes().await?;
 
         Ok(Self {
             api,
             plan_limit,
-            group_max: plan_limit.min(MAX_NODES_PER_GROUP),
+            group_cap,
+            limits,
             node_groups: RwLock::new(groups),
         })
     }
 
-    /// Builds the autoscaler's view of a group. Every UKS group is managed,
-    /// with the same limits.
-    fn to_node_group(&self, group: &UksNodeGroup) -> NodeGroup {
-        NodeGroup {
-            id: group.name.clone(),
-            min_size: MIN_NODES_PER_GROUP,
-            max_size: self.group_max,
-            debug: format!("{} (current size {})", group.name, group.count),
+    /// Prints each node group's limits, and warns about overrides that match
+    /// no node group (for example after a group was renamed).
+    pub(crate) fn log_limits(&self) -> Result<(), BoxError> {
+        println!(
+            "plan limit {}, node group cap {}",
+            self.plan_limit, self.group_cap
+        );
+
+        let cached = self
+            .node_groups
+            .read()
+            .map_err(|_| "node group cache lock poisoned")?;
+
+        for group in cached.iter() {
+            match self.limits.for_group(&group.name) {
+                Some(Limits { min, max }) => {
+                    println!("node group '{}': min {min}, max {max}", group.name)
+                }
+                None => println!("node group '{}': autoscaling disabled", group.name),
+            }
         }
+
+        let names: Vec<&str> = cached.iter().map(|group| group.name.as_str()).collect();
+        for name in self.limits.unknown_overrides(&names) {
+            println!("warning: node group override '{name}' matches no node group");
+        }
+
+        Ok(())
+    }
+
+    /// Builds the autoscaler's view of a group, or `None` if autoscaling is
+    /// disabled for it.
+    fn to_node_group(&self, group: &UksNodeGroup) -> Option<NodeGroup> {
+        let Limits { min, max } = self.limits.for_group(&group.name)?;
+        Some(NodeGroup {
+            id: group.name.clone(),
+            min_size: min,
+            max_size: max,
+            debug: format!("{} (current size {})", group.name, group.count),
+        })
+    }
+
+    /// Finds a group the autoscaler may resize, with its limits.
+    fn managed_group<'a>(
+        &self,
+        cached: &'a [UksNodeGroup],
+        id: &str,
+    ) -> Result<(&'a UksNodeGroup, Limits), Status> {
+        let group = cached
+            .iter()
+            .find(|group| group.name == id)
+            .ok_or_else(|| Status::not_found(format!("node group '{id}' not found")))?;
+        let limits = self.limits.for_group(id).ok_or_else(|| {
+            Status::failed_precondition(format!("node group '{id}' has autoscaling disabled"))
+        })?;
+        Ok((group, limits))
     }
 }
 
@@ -108,9 +162,10 @@ impl CloudProvider for UpcloudProvider {
             .read()
             .map_err(|_| Status::internal("node group cache lock poisoned"))?;
 
+        // Disabled groups are left out, so the autoscaler never resizes them.
         let node_groups = cached
             .iter()
-            .map(|group| self.to_node_group(group))
+            .filter_map(|group| self.to_node_group(group))
             .collect();
 
         Ok(Response::new(NodeGroupsResponse { node_groups }))
@@ -135,10 +190,7 @@ impl CloudProvider for UpcloudProvider {
                 .read()
                 .map_err(|_| Status::internal("node group cache lock poisoned"))?;
 
-            let group = cached
-                .iter()
-                .find(|group| group.name == id)
-                .ok_or_else(|| Status::not_found(format!("node group '{id}' not found")))?;
+            let (group, limits) = self.managed_group(&cached, &id)?;
 
             if group.state != "running" {
                 return Err(Status::failed_precondition(format!(
@@ -148,10 +200,10 @@ impl CloudProvider for UpcloudProvider {
             }
 
             let new_count = group.count + delta;
-            if new_count > self.group_max {
+            if new_count > limits.max {
                 return Err(Status::failed_precondition(format!(
                     "node group '{id}': {new_count} nodes would exceed the group max {}",
-                    self.group_max
+                    limits.max
                 )));
             }
 
@@ -207,10 +259,7 @@ impl CloudProvider for UpcloudProvider {
                 .read()
                 .map_err(|_| Status::internal("node group cache lock poisoned"))?;
 
-            let group = cached
-                .iter()
-                .find(|group| group.name == id)
-                .ok_or_else(|| Status::not_found(format!("node group '{id}' not found")))?;
+            let (group, limits) = self.managed_group(&cached, &id)?;
 
             // Nodes stuck coming up usually leave the group in "scaling-up" or
             // "failed", so those are allowed as well as "running".
@@ -228,9 +277,10 @@ impl CloudProvider for UpcloudProvider {
                     "node group '{id}': target {new_count} is below its {running} running nodes"
                 )));
             }
-            if new_count < MIN_NODES_PER_GROUP {
+            if new_count < limits.min {
                 return Err(Status::failed_precondition(format!(
-                    "node group '{id}': target {new_count} is below the minimum {MIN_NODES_PER_GROUP}"
+                    "node group '{id}': target {new_count} is below the group min {}",
+                    limits.min
                 )));
             }
 
@@ -272,10 +322,7 @@ impl CloudProvider for UpcloudProvider {
                 .read()
                 .map_err(|_| Status::internal("node group cache lock poisoned"))?;
 
-            let group = cached
-                .iter()
-                .find(|group| group.name == id)
-                .ok_or_else(|| Status::not_found(format!("node group '{id}' not found")))?;
+            let (group, limits) = self.managed_group(&cached, &id)?;
 
             // The autoscaler also deletes nodes that failed to come up, which
             // can leave the group in "scaling-up" or "failed".
@@ -287,10 +334,11 @@ impl CloudProvider for UpcloudProvider {
             }
 
             let new_count = group.count - nodes.len() as i32;
-            if new_count < MIN_NODES_PER_GROUP {
+            if new_count < limits.min {
                 return Err(Status::failed_precondition(format!(
-                    "node group '{id}': deleting {} nodes would leave {new_count}, below the minimum {MIN_NODES_PER_GROUP}",
-                    nodes.len()
+                    "node group '{id}': deleting {} nodes would leave {new_count}, below the group min {}",
+                    nodes.len(),
+                    limits.min
                 )));
             }
 
@@ -370,10 +418,11 @@ impl CloudProvider for UpcloudProvider {
             .read()
             .map_err(|_| Status::internal("node group cache lock poisoned"))?;
 
+        // Nodes in a disabled group are reported as unmanaged too.
         let node_group = cached
             .iter()
             .find(|group| group.nodes.iter().any(|n| n.uuid == uuid))
-            .map(|group| self.to_node_group(group));
+            .and_then(|group| self.to_node_group(group));
 
         match node_group {
             Some(node_group) => Ok(Response::new(NodeGroupForNodeResponse {
@@ -455,5 +504,154 @@ impl CloudProvider for UpcloudProvider {
             .collect();
 
         Ok(Response::new(NodeGroupNodesResponse { instances }))
+    }
+}
+
+// These only cover requests that are answered from the cache or rejected
+// before any API call, so they never reach UpCloud.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::clusterautoscaler::cloudprovider::v1::externalgrpc::ExternalGrpcNode;
+    use tonic::Code;
+
+    fn group(name: &str, nodes: &[&str]) -> UksNodeGroup {
+        UksNodeGroup {
+            name: name.into(),
+            count: nodes.len() as i32,
+            state: "running".into(),
+            nodes: nodes
+                .iter()
+                .map(|uuid| UksNode {
+                    name: format!("{name}-{uuid}"),
+                    uuid: (*uuid).into(),
+                    state: "running".into(),
+                })
+                .collect(),
+        }
+    }
+
+    fn provider(config: &str, groups: Vec<UksNodeGroup>) -> UpcloudProvider {
+        let config: NodeGroupsConfig = serde_json::from_str(config).unwrap();
+        UpcloudProvider {
+            api: UpcloudApi::new("test-cluster".into(), "test-token".into()),
+            plan_limit: 30,
+            group_cap: 16,
+            limits: config.resolve(16).unwrap(),
+            node_groups: RwLock::new(groups),
+        }
+    }
+
+    fn grpc_node(uuid: &str) -> ExternalGrpcNode {
+        ExternalGrpcNode {
+            provider_id: format!("{PROVIDER_ID_PREFIX}{uuid}"),
+            ..Default::default()
+        }
+    }
+
+    const CONFIG: &str = r#"{
+        "default": {"min": 2, "max": 3},
+        "overrides": {"big": {"max": 5}, "batch": {"enabled": false}}
+    }"#;
+
+    fn test_provider() -> UpcloudProvider {
+        provider(
+            CONFIG,
+            vec![
+                group("web", &["w1", "w2", "w3"]),
+                group("big", &["b1", "b2"]),
+                group("batch", &["x1"]),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn node_groups_reports_each_groups_limits_and_skips_disabled() {
+        let groups = test_provider()
+            .node_groups(Request::new(NodeGroupsRequest {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .node_groups;
+
+        let summary: Vec<_> = groups
+            .iter()
+            .map(|g| (g.id.as_str(), g.min_size, g.max_size))
+            .collect();
+        assert_eq!(summary, vec![("web", 2, 3), ("big", 2, 5)]);
+    }
+
+    #[tokio::test]
+    async fn node_in_disabled_group_is_unmanaged() {
+        let p = test_provider();
+        let group_for = |uuid: &str| {
+            p.node_group_for_node(Request::new(NodeGroupForNodeRequest {
+                node: Some(grpc_node(uuid)),
+            }))
+        };
+
+        let managed = group_for("w1").await.unwrap().into_inner();
+        assert_eq!(managed.node_group.unwrap().id, "web");
+
+        let disabled = group_for("x1").await.unwrap().into_inner();
+        assert_eq!(disabled.node_group.unwrap().id, "");
+    }
+
+    #[tokio::test]
+    async fn increase_above_group_max_is_rejected() {
+        let err = test_provider()
+            .node_group_increase_size(Request::new(NodeGroupIncreaseSizeRequest {
+                delta: 1,
+                id: "web".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert!(err.message().contains("exceed the group max 3"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn delete_below_group_min_is_rejected() {
+        let err = test_provider()
+            .node_group_delete_nodes(Request::new(NodeGroupDeleteNodesRequest {
+                nodes: vec![grpc_node("b1")],
+                id: "big".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert!(err.message().contains("below the group min 2"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn resizing_a_disabled_group_is_rejected() {
+        let p = test_provider();
+
+        let increase = p
+            .node_group_increase_size(Request::new(NodeGroupIncreaseSizeRequest {
+                delta: 1,
+                id: "batch".into(),
+            }))
+            .await
+            .unwrap_err();
+        let decrease = p
+            .node_group_decrease_target_size(Request::new(NodeGroupDecreaseTargetSizeRequest {
+                delta: -1,
+                id: "batch".into(),
+            }))
+            .await
+            .unwrap_err();
+        let delete = p
+            .node_group_delete_nodes(Request::new(NodeGroupDeleteNodesRequest {
+                nodes: vec![grpc_node("x1")],
+                id: "batch".into(),
+            }))
+            .await
+            .unwrap_err();
+
+        for err in [increase, decrease, delete] {
+            assert_eq!(err.code(), Code::FailedPrecondition);
+            assert!(err.message().contains("autoscaling disabled"), "{err}");
+        }
     }
 }

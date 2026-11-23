@@ -21,6 +21,37 @@
       "properties": {
         "extraArgs": { "type": "object" }
       }
+    },
+    "nodeGroups": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": { "$ref": "#/definitions/nodeGroupSettings" },
+        "overrides": {
+          "type": "object",
+          "description": "Settings for specific node groups, keyed by UKS node group name.",
+          "additionalProperties": { "$ref": "#/definitions/nodeGroupSettings" }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "nodeGroupSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "min": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Fewest nodes. UKS doesn't allow empty node groups."
+        },
+        "max": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Most nodes. The provider rejects a max above the cluster's per-group cap, or below min."
+        },
+        "enabled": { "type": "boolean" }
+      }
     }
   }
 }

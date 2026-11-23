@@ -10,3 +10,5 @@ data:
   # no TLS settings are needed.
   cloud-config: |-
     address: "localhost:8086"
+  # Node group limits, read by the provider.
+  node-groups.json: {{ .Values.nodeGroups | toJson | quote }}

@@ -86,6 +86,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "uca.secretName" . }}
                   key: {{ include "uca.secretKey" . }}
+            - name: UPCLOUD_NODE_GROUPS_CONFIG
+              value: /config/node-groups.json
+          volumeMounts:
+            - name: cloud-config
+              mountPath: /config
+              readOnly: true
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

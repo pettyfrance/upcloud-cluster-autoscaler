@@ -66,6 +66,9 @@ jobs:
         run: |
           helm template test "$CHART" --set clusterId="$CLUSTER_ID" --set upcloud.existingSecret=uca-token > /dev/null
           helm template test "$CHART" --set clusterId="$CLUSTER_ID" --set upcloud.token=example > /dev/null
+          helm template test "$CHART" --set clusterId="$CLUSTER_ID" --set upcloud.existingSecret=uca-token \
+            --set nodeGroups.default.min=2 --set nodeGroups.default.max=3 \
+            --set nodeGroups.overrides.big.max=5 --set nodeGroups.overrides.batch.enabled=false > /dev/null
 
       # Each of these must fail with the expected message, so a later change
       # can't quietly remove a safety check.
@@ -89,3 +92,9 @@ jobs:
           expect_fail "does not match pattern" --set clusterId=not-a-uuid --set upcloud.existingSecret=uca-token
           expect_fail "An UpCloud API token is required" --set clusterId="$CLUSTER_ID"
           expect_fail "Set only one of" --set clusterId="$CLUSTER_ID" --set upcloud.token=a --set upcloud.existingSecret=b
+
+          valid=(--set clusterId="$CLUSTER_ID" --set upcloud.existingSecret=uca-token)
+          expect_fail "minimum: got 0, want 1" "${valid[@]}" --set nodeGroups.default.min=0
+          expect_fail "minimum: got 0, want 1" "${valid[@]}" --set nodeGroups.overrides.web.min=0
+          expect_fail "additional properties 'maxx' not allowed" "${valid[@]}" --set nodeGroups.default.maxx=3
+          expect_fail "got string, want boolean" "${valid[@]}" --set nodeGroups.overrides.web.enabled=nope
